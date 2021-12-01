@@ -1017,7 +1017,7 @@ $ArrForests = @()
 $ArrForests += 'dco.net'
 #$ArrForests += 'blackbaud.net'
 #$ArrForests += 'blackbaudhost.com'
-#$ArrForests += 'production.local'
+
 $ArrForests | Foreach {Get-ADForestUsers $_ -debug}
 
 $DT_ADUserObjs = $Null
