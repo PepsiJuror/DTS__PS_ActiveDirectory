@@ -1,6 +1,6 @@
 <#
 .Synopsis
-    Script pulls list of forest/domain GPO and identifies their differing statuses
+    Script pulls list of forest/domain GPO and identifies their differing statuses.
 
 .Description
     Script provides high level details concerning Domain GPO details. User/Computer node status,
