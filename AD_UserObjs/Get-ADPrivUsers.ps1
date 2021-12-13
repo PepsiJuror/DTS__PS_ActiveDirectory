@@ -1,11 +1,130 @@
-# Updated 06/18/21
-Clear-Host
-$Error.Clear()
-# Acquires Date
-$Date = Get-Date
+[cmdletbinding()]
+    Param (
+            [Parameter(Mandatory=$False,
+                        HelpMessage="Provide Forest Name(s)")]
+                            [Array]$Forests,
+
+            [Parameter(Mandatory=$False,
+                        HelpMessage="Export Privileged Group(s)")]
+                            [Switch]$ExportGroups,
+
+            [Parameter(Mandatory=$False,
+                        HelpMessage="File Export Path")]
+                            [String]$AltExportPath = $Null
+            )
+
+    <#
+    .Synopsis
+        Script combs through a forest and collects detailed privileged groups and principals.
+
+    .Description
+        Script systematically combs through an AD forest and all domains to collect
+            a. privileged groups
+            b. privileged users
+    
+        Script Steps:
+            1. Cycles through and captures all Forest Domains.
+                - Forest
+                - Domain
+                - Domain SID
+                - Domain Controller
+                - Domain Distinguished Name (DN)
+
+            2. Cycles through each forest domain and captures privileged & nest groups
+                - Group Nest Type: Parent or Nested Group
+                - Group Scope: Local Domain or Foreign Domain (e.g. nested from another domain)
+                - Group | Parent Domain & Group Name
+                - Group | Child Domain & Group Name
+                - Group | Interitance Broken
+                - Group Member:
+                    - Computer Counts Only
+                    - Foreign Principals Counts Only
+                    - Group Managed Service Accounts (GMSA) Counts Only
+                    - Nest Group Counts Only
+                    - Direct & Nested Users Counts Only
+                        - Percentage of User Duplicates
+                - Group | Nested Group DNs and Display Names
+                - Optional Output to file
+
+            3. Cycles through each privileged & nested group
+            3a. Queries each forest domain to obtain detailed user info
+            3b. Exports Detailed Privileged Group and User Information to File (note: all attributes not included)
+                - Group Details (see above)
+                - User | Forest
+                - User | Domain
+                - User | Scope - i.e. whether user domain is local or foreign to privileged group
+                - User | Expiration Details (custom code to include expired X days ago)
+                - User | Enabled/Disabled
+                - User | Last Logon (custom code to include logon on X days ago)
+                - User | Kerberos Encryption Types
+                - User | Memberof Groups
+                - User | Privileged Group Count
+                - User | Password Details
+                - User | User Account Control (UAC) Details
+
+            Default CSV Output: $env:TEMP\MMddyy-Data
+            Example CSV Output: C:\Users\Shawn.May\AppData\Local\Temp\120321-Data
+
+    .Notes:
+        File Name: Get-ADPrivUser-Details.ps1
+        Author   : Shawn May
+        Email    : shawn@yourdts.com
+        Requires : Powershell V3 or greater
+        Version  : 1.0
 
 
+    .PARAMETER Forests
+        Optional: Specify list of Forests to query. If empty, queryies local forest
+
+    .PARAMETER ExportGroups
+        Optional: Specify whether to export privileged groups
+        
+    .PARAMETER AltExportPath
+        Optional: Specify alternate CSV Output path
+
+    .EXAMPLE
+        .\Get-ADPrivUser-Details.ps1 -Forests acme.com, warnerbro.com
+
+    .EXAMPLE
+        .\Get-ADPrivUser-Details.ps1 -ExportGroups
+
+    .EXAMPLE
+        .\Get-ADPrivUser-Details.ps1 -AltExportPath 'C:\temp\Output'
+    #>
+
+    # Clears Host
+    Clear-Host
+
+    # Acquires Date
+    $Date = Get-Date
+
+    # Generates File Date Suffix - e.g. 2020-8-23-23-49
+    $StrFileDateSuffix = "{0}-{1}-{2}-{3}-{4}" `
+                -f $Date.year, $Date.month, $Date.Day, `
+                    $Date.Minute, $Date.Second
+
+    # Generates Export Path
+    $RootExportFolder = Join-Path $env:TEMP ((Get-Date -format "MMddyy") + "-Data")
+
+    # Checks Export path parameter was passed to Script
+    if (![string]::IsNullOrEmpty($AltExportPath))
+        {
+        # Replaces variable with alternate export path
+        $RootExportFolder = $AltExportPath
+        }
+
+    # Checks if export path exists
+    if ((Test-Path $RootExportFolder) -eq $False)
+        {
+        # Try | Catch Statement
+        Try {$a = New-Item -ItemType directory -Path $RootExportFolder -ErrorAction Stop}
+        Catch {Write-Host "Specified Drive and/or Folder does not exist." `
+            -ForegroundColor Yellow ; exit}
+        }
+
+# User Class
 Class User {
+    # Defines Class object attributes
     [Array]    hidden $AddrTypes = @('SMTP','SIP')
     [datetime] hidden $Date
     [Bool]     $IsCriticalSystemObject
@@ -29,7 +148,6 @@ Class User {
     [string]   $eTypes
     [string]   $UserSID
 
-
     # Constructor
     User() {}
 
@@ -47,6 +165,7 @@ Class User {
         $this.UserSID = $ObjUser.SID.ToString()
         }
 
+    # Translates Kerb Encryption Type
     GetETypes($SupportedEncryptionTypesIn)
         {
         Switch ($SupportedEncryptionTypesIn)
@@ -87,6 +206,7 @@ Class User {
             }
         }
 
+    # Checks whether object is a critical system objects
     SetCriticalFlag([Bool]$IsCriticalIn)
         {
         if ($IsCriticalIn -is [object])
@@ -95,8 +215,10 @@ Class User {
             {$this.IsCriticalSystemObject = [DBNull]::Value}
         }
 
+    # Translates Account Expiration Details
     GetADExpiration([Int64]$ExpirationIn)
         {
+        # Populates Date Attribute
         $this.Date = Get-Date
 
         # Checks value - Nonexpiring Value
@@ -128,9 +250,9 @@ Class User {
                 #$this.Stale = $True
                 }
             }
-
         }
 
+    # Translates Proxy Addresses
     GetProxyAddr([array]$ProxyAddrIn,[string]$AddrFilter)
         {
         $ProxyAddr = $Null
@@ -160,32 +282,42 @@ Class User {
             {$this.SIPProxyAddr = $ProxyAddr}
         }
 
+    # Translates Last Logon Details
     DecodeLastLogon($LastLogonTimeStampIn,$LastLogonDateIn)
         {
+        # Checks if object
         if ($LastLogonTimeStampIn -is [object])
             {$this.LastLogonTimeStamp = [datetime]::FromFileTime($LastLogonTimeStampIn).toshortdatestring()}
         else
             {$this.LastLogonTimeStamp = $Null}
 
+        # Checks if object
         if ($LastLogonDateIn -is [object])
             {$this.LastLogonDate = ($LastLogonDateIn).toshortdatestring()}
         else
             {$this.LastLogonDate = $Null}
         }
 
+    # Captures MemberOf  Details
     GetMemberOf($MemberofIn)
         {
+        # Cycles through array
         foreach ($Member in $MemberofIn)
             {
+            # Checks if object is null or empty
             if ([string]::IsNullOrEmpty($this.Memberof))
                 {$this.Memberof = $Member}
             else
                 {$this.Memberof += ("`n" + $Member)}
             }
+        # Measure Object Count
         $this.GroupCount = ($MemberofIn | Measure-Object).count
+
+        # Assigns Values
         $MemberofIn | foreach {$this.ArrMemberof += @($_)}
         }
 
+    # Translates UAC Details
     DecodeUAC($UserAccountControl)
         {
         $this.PWNotRequired = (($UserAccountControl -band 32) -eq 32)
@@ -195,29 +327,10 @@ Class User {
         $this.UseDesKeyOnly = (($UserAccountControl -band 2097152) -eq 2097152)
         }
 
+    # Calculates time span
     [Int32]GetDateDiff([datetime]$DateIn, [datetime]$today)
-        {
-        Return (New-TimeSpan -Start $DateIn -End $today).Days
-        #Return $this.Days
-        }
-
-
+        {Return (New-TimeSpan -Start $DateIn -End $today).Days}
 }
-
-# Function | Validates and/creates output folder path
-Function Validate-Folder {
-    [cmdletbinding()]
-        Param 
-            ([Parameter(Mandatory=$True)]
-                [String]$Folderin
-            )
-    # Tests path
-    if ((Test-Path $Folderin) -eq $False)
-        {
-        # Creates New Directory (supresses output)
-        $a = New-Item -ItemType directory -Path $Folderin
-        }
-    }
 
 # Function | Converts FQDN to DistinguishedName
 Function Convert-FQDN2DN {
@@ -242,7 +355,7 @@ Function Convert-FQDN2DN {
     Return $DomainDN
 }
 
-# Function | Builds Forest Domains Datatable
+# Function | Populates Forest Domains Datatable
 Function Build-ForestDomSIDDT {
     [cmdletbinding()]
         Param($ObjForestIn)
@@ -268,20 +381,13 @@ Function Build-ForestDomSIDDT {
         }
 }
 
-# Function | Builds Forest Privileged Group Datatable
+# Function | Populates Forest Privileged Group Datatable
 Function Build-ForestPrivGroupDT {
     [cmdletbinding()]
         Param($ObjForestIn)
 
     # Privileged Group Membership for the following groups:
     # Reference: http://support.microsoft.com/kb/243330
-
-    # GPO Full Report CSV File Name
-    $CSVFileName = ("_" + $ObjForestIn.name + "_ForestPrivilegedGrps_" + $StrFileDateSuffix + ".csv"`
-            -f $Date.year, $Date.month, $Date.Day)
-
-    # Join Path to create Export Variable
-    $Export = Join-Path 'S:\UserData\ShawnMay' $CSVFileName
 
     # Calls Function to Obtain list of Forest Domains, DomainSIDs, and Domain Controllers
     Write-Host ('Querying Forest Details: ' + $ObjForestIn.name)
@@ -365,19 +471,33 @@ Function Build-ForestPrivGroupDT {
             $ColNestedGrps = $Null ; $ObjNestedDomain = $Null
             }
         }
+
+    if ($ExportGroups)
+        {
+        # GPO Full Report CSV File Name
+        $CSVGrpFileName = ("_" + $ObjForestIn.name + "_Forest_PrivGroups_" + $StrFileDateSuffix + ".csv" `
+                -f $Date.year, $Date.month, $Date.Day).ToUpper()
+
+        # Join Path to create Export Variable
+        $Export = Join-Path $RootExportFolder $CSVGrpFileName
     
-    # Exports Datatable to CSV
-    $DT_ForestPrivGrps | Export-Csv $Export -NoTypeInformation
-    
-    
+        # Exports Datatable to CSV
+        $DT_ForestPrivGrps | Export-Csv $Export -NoTypeInformation
+
+        # Post Script: Writes Output to Screen
+        $script:ArrOutputCSVs += @("Forest Groups:$($ObjForestIn.Rootdomain) | Output CSV File: $Export")
+        }
     }
 
+# Captures DNs
 Function Get-NestDNs {
     [cmdletbinding()]
         Param($ObjIn)
 
+    # Cycles through DNs
     foreach ($DN in $ObjIn)
-        { 
+        {
+        # Checks if variables are empty
         if ([string]::IsNullOrEmpty($Temp1) -or [string]::IsNullOrEmpty($Temp2))
             {
             $Temp1 = $DN.DistinguishedName
@@ -394,24 +514,9 @@ Function Get-NestDNs {
     $StrNestedDNOut += $Temp2
     Return [array]$StrNestedDNOut
 }
-    
+
+# Function Defines AD & Data Table Attributes    
 Function Define-Attributes {
-        <#
-        .Synopsis
-            Function Defines & Populates:
-                1.) Data Table Columns
-
-        .Notes:
-            Function Name: Define-Attributes
-            Author: Shwan May
-            Email: shawn.may@yourdts.com
-            Requires: Powershell V3 or greater
-
-        .PARAMETER
-    
-        .EXAMPLE
-        #>
-
     [cmdletbinding()]
         Param([Parameter(Mandatory=$True)]
                 [Int32]$IntGrp)
@@ -435,16 +540,17 @@ Function Define-Attributes {
     $Script:ADUserAttribs += @('logonCount')
     $Script:ADUserAttribs += @('msDS-SupportedEncryptionTypes')
     $Script:ADUserAttribs += @('MemberOf','Organization')
+    $Script:ADUserAttribs += @('ObjectGUID')
     $Script:ADUserAttribs += @('PasswordLastSet','pwdLastSet')
     $Script:ADUserAttribs += @('PasswordExpired')
     $Script:ADUserAttribs += @('CannotChangePassword')
     $Script:ADUserAttribs += @('PasswordNeverExpires','PasswordNotRequired')
     $Script:ADUserAttribs += @('SamAccountName','ScriptPath')
+    $Script:ADUserAttribs += @('SID')
     $Script:ADUserAttribs += @('SIDHistory')
     $Script:ADUserAttribs += @('UserAccountControl','UserPrincipalName')
     $Script:ADUserAttribs += @('whenChanged','whenCreated')
     $Script:ADUserAttribs += @('DistinguishedName')
-
 
     Switch ($IntGrp)
         {
@@ -457,24 +563,25 @@ Function Define-Attributes {
                 $ArrDTCols += @('DomainController')
                 }
 
-# Privileged Group Data Table Columns
+    # Privileged Group Data Table Columns
             1
                 {
                 $ArrDTCols += @('ReportDate')
-                $ArrDTCols += @('NestType')
-                $ArrDTCols += @('PrivGrpScope')
-                $ArrDTCols += @('ParentGrp')
-                $ArrDTCols += @('ChildGrp')
-                $ArrDTCols += @('Forest')
-                $ArrDTCols += @('Domain')
-                $ArrDTCols += @('DomainDN')
-                $ArrDTCols += @('DomainController')
-                $ArrDTCols += @('DomainSID')
-                $ArrDTCols += @('PrivGrpName')
-                $ArrDTCols += @('PrivGrpDN')
-                $ArrDTCols += @('PrivGrpSID')
-                $ArrDTCols += @('AdminCount')
-                $ArrDTCols += @('InheritanceBroken')
+                $ArrDTCols += @('Grp_NestType')
+                $ArrDTCols += @('Grp_Scope')
+                $ArrDTCols += @('Grp_Name')
+                $ArrDTCols += @('AD_Forest')
+                $ArrDTCols += @('Grp_Parent_Domain')
+                $ArrDTCols += @('Grp_Parent')
+                $ArrDTCols += @('Grp_Child_Domain')
+                $ArrDTCols += @('Grp_Child')
+                $ArrDTCols += @('AD_DC')
+                $ArrDTCols += @('AD_DomainDN')
+                $ArrDTCols += @('AD_DomainSID')
+                $ArrDTCols += @('Grp_DN')
+                $ArrDTCols += @('Grp_SID')
+                $ArrDTCols += @('Grp_AdminCount')
+                $ArrDTCols += @('Grp_InheritanceBroken')
                 $ArrDTCols += @('NestedCompCnt')
                 $ArrDTCols += @('NestedForeignPrinCnt')
                 $ArrDTCols += @('NestedGMSACnt')
@@ -489,28 +596,30 @@ Function Define-Attributes {
             
 # Privileged User Data Set Columns
             2
-                {
+                                {
                 # Default Array Definition: DataTable Column List
                 $ArrDTCols += @('ReportDate')
-                $ArrDTCols += @('Grp_Forest')
-                $ArrDTCols += @('Grp_Domain')
                 $ArrDTCols += @('Grp_NestType')
                 $ArrDTCols += @('Grp_Scope')
-                $ArrDTCols += @('Grp_Parent')
-                $ArrDTCols += @('Grp_Child')
-                $ArrDTCols += @('Grp_DomainDN')
-                $ArrDTCols += @('Grp_DomainController')
-                $ArrDTCols += @('Grp_DomainSID')
                 $ArrDTCols += @('Grp_Name')
+                $ArrDTCols += @('AD_Forest')
+                $ArrDTCols += @('Grp_Parent_Domain')
+                $ArrDTCols += @('Grp_Parent')
+                $ArrDTCols += @('Grp_Child_Domain')
+                $ArrDTCols += @('Grp_Child')
+                $ArrDTCols += @('AD_DC')
+                $ArrDTCols += @('AD_DomainDN')
+                $ArrDTCols += @('AD_DomainSID')
                 $ArrDTCols += @('Grp_DN')
                 $ArrDTCols += @('Grp_SID')
                 $ArrDTCols += @('Grp_AdminCount')
                 $ArrDTCols += @('Grp_InheritanceBroken')
-		        $ArrDTCols += @('Stale')
+		$ArrDTCols += @('Stale')
                 $ArrDTCols += @('User_Forest')
                 $ArrDTCols += @('User_Domain')
+                $ArrDTCols += @('User_Scope')
                 $ArrDTCols += @('IsCriticalSystemObject')
-		        $ArrDTCols += @('SamAccountName')
+		$ArrDTCols += @('SamAccountName')
                 $ArrDTCols += @('DisplayName')
                 $ArrDTCols += @('Enabled')
                 $ArrDTCols += @('Expired')
@@ -531,7 +640,7 @@ Function Define-Attributes {
                 $ArrDTCols += @('adminCount','adminDescription')
                 $ArrDTCols += @('ProxyAddresses')
                 $ArrDTCols += @('ProxySMTPAddr','ProxySIPAddr')
-                $ArrDTCols += @('MemberOf','GroupCount','AdmGrpCnt','Organization')
+                $ArrDTCols += @('MemberOf','GroupCount','PrivGrpCnt','Organization')
                 $ArrDTCols += @('pwdExpired')
                 $ArrDTCols += @('pwdLastSet')
                 $ArrDTCols += @('pwdLastSetDaysAgo')
@@ -549,13 +658,14 @@ Function Define-Attributes {
                 }
         }
     Return $ArrDTCols
-
 }
 
+# Function cycles through and writes privileged group details to Data Table
 Function Write-toTable {
     [cmdletbinding()]
         Param($ObjDCIn, $StrSIDIn)
 
+    # Clears Errors
     $Error.Clear()
 
     # LDAP Filter - SID
@@ -586,7 +696,9 @@ Function Write-toTable {
                             -Properties $GrpProps  | Select-Object $SelProps
         # Assigns Variable Value
         $NestType = ('Nested Group')
-        $ChildGrp = ($ObjGrp.name)
+
+        $DomChildGrp = $ObjDCIn.domain
+        $ChildGrp = $ObjGrp.name
 
         $StrDashes = '---'
         $Color = 'Green'
@@ -598,11 +710,15 @@ Function Write-toTable {
                         -Server $ObjDCIn.HostName[0] `
                             -Properties $GrpProps  | Select-Object $SelProps
         
+        # Populates variables
         $NestType = 'Parent Group'
-        $Script:ParentGrp = ($ObjGrp.name)
+        $Script:DomParentGrp = $ObjDCIn.domain
+        $Script:ParentGrp = $ObjGrp.name
+        $DomChildGrp = 'n/a'
         $ChildGrp = 'n/a'
         }
     
+    # Writes output to screen
     Write-Host ($StrDashes + ' Querying Privileged ' + $NestType + ' Details: ' + $ObjGrp.Name + ' - ' + $GrpScope) `
                     -ForegroundColor $Color
 
@@ -626,6 +742,7 @@ Function Write-toTable {
     $TmpUsers += Get-ADUser -LDAPFilter $LDAPQuery `
                     -Server ($ObjDCIn.HostName[0] + ":3268")
 
+    # Measure User Count
     $DirUserCnt += ($TmpUsers | Measure-Object).count
     $NestedUserCnt += $DirUserCount
 
@@ -650,44 +767,42 @@ Function Write-toTable {
     $ObjDTRow_PrivGrps = $DT_ForestPrivGrps.NewRow()
 
     # Adds Rows and Values to Datatable
-    $ObjDTRow_PrivGrps.ReportDate        = ($Date).ToShortDateString()
-    $ObjDTRow_PrivGrps.Forest            = $ObjDCIn.Forest
-    $ObjDTRow_PrivGrps.Domain            = $ObjDCIn.Domain
-    $ObjDTRow_PrivGrps.DomainDN          = [string](Convert-FQDN2DN ($ObjDCIn.Domain))
-    $ObjDTRow_PrivGrps.DomainController  = $ObjDCIn.HostName[0]
-    $ObjDTRow_PrivGrps.DomainSID         = $DomainSID
-    $ObjDTRow_PrivGrps.NestType          = $NestType
-    $ObjDTRow_PrivGrps.PrivGrpScope      = $GrpScope
-    $ObjDTRow_PrivGrps.ParentGrp         = $ParentGrp
-    $ObjDTRow_PrivGrps.ChildGrp          = $ChildGrp
-    $ObjDTRow_PrivGrps.PrivGrpName       = $ObjGrp.Name
-    $ObjDTRow_PrivGrps.PrivGrpDN         = $ObjGrp.DistinguishedName
-    $ObjDTRow_PrivGrps.PrivGrpSID        = $ObjGrp.objectSID.ToString()
-    $ObjDTRow_PrivGrps.AdminCount        = $ObjGrp.adminCount
-    $ObjDTRow_PrivGrps.InheritanceBroken = $ObjGrp.'$_.nTSecurityDescriptor.AreAccessRulesProtected'
-    $ObjDTRow_PrivGrps.NestedGroupCnt    = ($NestedGrpsIn | Measure-Object).count
-    $ObjDTRow_PrivGrps.DirectUserCnt     = $DirUserCnt
-    $ObjDTRow_PrivGrps.NestedForeignPrinCnt = ($NestedObjIn | where {$_.objectclass -eq 'foreignSecurityPrincipal'} | Measure-Object).count
-    $ObjDTRow_PrivGrps.NestedCompCnt        = ($NestedObjIn | where {$_.objectclass -eq 'computer'} | Measure-Object).count
-    $ObjDTRow_PrivGrps.NestedGMSACnt        = ($NestedObjIn | where {$_.objectclass -eq 'msDS-GroupManagedServiceAccount'} | Measure-Object).count
-    
-    $ObjDTRow_PrivGrps.NestedUserCnt      = $NestedUserCnt
+    $ObjDTRow_PrivGrps.ReportDate            = ($Date).ToShortDateString()
+    $ObjDTRow_PrivGrps.Grp_NestType          = $NestType
+    $ObjDTRow_PrivGrps.Grp_Scope             = $GrpScope
+    $ObjDTRow_PrivGrps.Grp_Name              = $ObjGrp.Name
+    $ObjDTRow_PrivGrps.AD_Forest             = $ObjDCIn.Forest
+    $ObjDTRow_PrivGrps.Grp_Parent_Domain     = $DomParentGrp
+    $ObjDTRow_PrivGrps.Grp_Parent            = $ParentGrp
+    $ObjDTRow_PrivGrps.Grp_Child_Domain      = $DomChildGrp
+    $ObjDTRow_PrivGrps.Grp_Child             = $ChildGrp
+    $ObjDTRow_PrivGrps.AD_DC                 = $ObjDCIn.HostName[0]
+    $ObjDTRow_PrivGrps.AD_DomainDN           = [string](Convert-FQDN2DN ($ObjDCIn.Domain))
+    $ObjDTRow_PrivGrps.AD_DomainSID          = $DomainSID
+    $ObjDTRow_PrivGrps.Grp_DN                = $ObjGrp.DistinguishedName
+    $ObjDTRow_PrivGrps.Grp_SID               = $ObjGrp.objectSID.ToString()
+    $ObjDTRow_PrivGrps.Grp_AdminCount        = $ObjGrp.adminCount
+    $ObjDTRow_PrivGrps.Grp_InheritanceBroken = $ObjGrp.'$_.nTSecurityDescriptor.AreAccessRulesProtected'
+    $ObjDTRow_PrivGrps.NestedGroupCnt        = ($NestedGrpsIn | Measure-Object).count
+    $ObjDTRow_PrivGrps.DirectUserCnt         = $DirUserCnt
+    $ObjDTRow_PrivGrps.NestedForeignPrinCnt  = ($NestedObjIn | where {$_.objectclass -eq 'foreignSecurityPrincipal'} | Measure-Object).count
+    $ObjDTRow_PrivGrps.NestedCompCnt         = ($NestedObjIn | where {$_.objectclass -eq 'computer'} | Measure-Object).count
+    $ObjDTRow_PrivGrps.NestedGMSACnt         = ($NestedObjIn | where {$_.objectclass -eq 'msDS-GroupManagedServiceAccount'} | Measure-Object).count
+    $ObjDTRow_PrivGrps.NestedUserCnt         = $NestedUserCnt
     if ($NestedUserCnt -gt 0)
-        {$ObjDTRow_PrivGrps.('%UserDups') = (($NestedUserCnt - $TotalUniqueCnt)/$NestedUserCnt).ToString("P")}
+        {$ObjDTRow_PrivGrps.('%UserDups')    = (($NestedUserCnt - $TotalUniqueCnt)/$NestedUserCnt).ToString("P")}
     else
-        {$ObjDTRow_PrivGrps.('%UserDups') = (0).ToString("P")}
-    $ObjDTRow_PrivGrps.UniqueUserCnt = $TotalUniqueCnt
-    $ObjDTRow_PrivGrps.NestedGroupsDN    = if ($NestedDetails.Count -eq 0) {"None"} else {$NestedDetails[0]}
-    $ObjDTRow_PrivGrps.NestedGroupsName  = if ($NestedDetails.Count -eq 0) {"None"} else {$NestedDetails[1]}
+        {$ObjDTRow_PrivGrps.('%UserDups')    = (0).ToString("P")}
+    $ObjDTRow_PrivGrps.UniqueUserCnt         = $TotalUniqueCnt
+    $ObjDTRow_PrivGrps.NestedGroupsDN        = if ($NestedDetails.Count -eq 0) {"None"} else {$NestedDetails[0]}
+    $ObjDTRow_PrivGrps.NestedGroupsName      = if ($NestedDetails.Count -eq 0) {"None"} else {$NestedDetails[1]}
     $DT_ForestPrivGrps.Rows.Add($ObjDTRow_PrivGrps)
-
-    # Iterative export to CSV
-    # $ObjDTRow_PrivGrps | Export-Csv $Export -NoTypeInformation -Append
 
     if ($ObjNestedDomain -isnot [object])
         {Return ,$NestedGrpsIn}
 }
 
+# Function builds Datatable
 Function Build-DataTable {
     [cmdletbinding()]
         Param (
@@ -739,7 +854,7 @@ Function Build-DataTable {
         
         elseif (($DTColumn -eq 'UserAccountControl') -or `
                     ($DTColumn -eq 'GroupCount') -or `
-                    ($DTColumn -eq 'AdmGrpCnt'))
+                    ($DTColumn -eq 'PrivGrpCnt'))
             {$DTColTmp =  new-object Data.DataColumn $DTColumn,([Int32])}
 
         elseif (($DTColumn -eq 'whenCreated') -or `
@@ -755,40 +870,36 @@ Function Build-DataTable {
     Return ,$ObjDTOut
 }
 
+# Function Captures Forest Object
 Function Get-ADForestObjects {
-    Param ([Parameter(Mandatory=$False)] [string]$ForestName,
-           [Parameter(Mandatory=$False)] [System.Management.Automation.PsCredential]$Credential)
+    Param ([Parameter(Mandatory=$False)] [string]$ForestNameIn)
+
+    $StrError = "Unable to Locate Forest - $ForestNameIn `n`Exiting Script"
 
     #if forest variable is not specified, retrieve current forest
-    If (!$ForestName)     
-        {$ForestName = [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest().Name.ToString()}        
-
-    #if Credential specified
-    If ($Credential)
-        {        
-        $credentialUser = $Credential.UserName.ToString()
-        $credentialPassword = $Credential.GetNetworkCredential().Password.ToString()
-        $ObjForest = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext("forest", $ForestName, $credentialUser, $credentialPassword )
-        }    
-    Else     
-        {$ObjForest = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext("forest", $ForestName)}        
-
-    Try {
-        $ObjForestOut = ([System.DirectoryServices.ActiveDirectory.Forest]::GetForest($ObjForest))
+    If (!$ForestNameIn)     
+        {
+        Try {$ObjForestOut = Get-ADForest}
+        Catch {Write-Warning $StrError}
         }
-
-    Catch {Log-Message "Unable to Locate Forest:$ForestName"
-            Write-Warning "Unable to Locate Forest - $ForestName"}
-
+    else
+        {
+        Try {$ObjForestOut = Get-ADForest -Server $ForestNameIn}
+        Catch {Write-Warning $StrError}
+        }
     Return $ObjForestOut
 }
 
-Function Get-ADForestUsers {
+# Function obtains user privileged group
+Function Get-ADPrivUsers {
     [cmdletbinding()]
-        Param([string]$Forest)
+        Param([string]$ForestIn)
+    
+    # Clears Host
+    Clear-Host
 
     # Captures Forest Object
-    $ObjForest = Get-ADForestObjects -ForestName $Forest
+    $ObjForest = Get-ADForestObjects -ForestName $ForestIn
 
         # Retrieves Attributes for Datatable
         $ArrDTCol = Define-Attributes -IntGrp 0
@@ -811,95 +922,150 @@ Function Get-ADForestUsers {
         # Build Data View for Querying
         $DV_ForestPrivGrps = New-Object System.Data.Dataview($DT_ForestPrivGrps)
 
-        #Write-Debug "Captured All Privileged Groups"
-
+    # Retrieves Attributes for Datatable
     $ArrDTCol = Define-Attributes -IntGrp 2
 
+    # Builds User Datatable
     $DT_ADUserObjs = Build-DataTable -StrDTTitleIn "ForestUsers" -ArrAttribsIn $ArrDTCol
 
-    # Initial CSV Output
-    $CSVOutFile = ("_" + $Forest + "_ForestPrivilegedUsers_" + "_$StrFileDateSuffix.csv")
+    #################################
+    # GPO Full Report CSV File Name
+        $CSVFileName = ("_" + $ObjForest.rootDomain + "_Forest_PrivUsers_" + $StrFileDateSuffix + ".csv").ToUpper()
+        $Export = Join-Path $RootExportFolder $CSVFileName
 
-    # Joins Export File/Path
-    $CSVOut_FullPath = Join-Path $RootExportFolder $CSVOutFile
-
-    # Define Array - Forest DCs Objects
-    $ObjPrivUsers = @()
-
-    # Cycle Through List of Forest Domains
+    # Cycle Through Forest Privilaged Groups (i.e. Data Table)
     foreach ($ForestPrivGrp in $DV_ForestPrivGrps)
         {
+
+        # Builds LDAP Query - Filters for:
+        # - User Objects
+        # - MemberOf attribute Contains Privileged Group DN
         $StrLDAPFilterOut   = "(&"
         $StrLDAPFilterOut  +=  "(objectClass=user)"
         $StrLDAPFilterOut  +=  "(objectclass=person)"
-        $StrLDAPFilterOut  +=  "(Memberof=$($ForestPrivGrp.PrivGrpDN))"
+        $StrLDAPFilterOut  +=  "(Memberof=$($ForestPrivGrp.Grp_DN))"
         $StrLDAPFilterOut  += ")"
 
         if ($SubsetCount -eq 0)
             {$SubsetCount = $Null}
 
+        # Create Temporary Array Variable - Forest Privileged Users
         $ArrADUserObjs = @()
+
+        # Properties Array
+        $TmpADUserAttribs = @()
+        $TmpADUserAttribs += @('SID')
+        $TmpADUserAttribs += @('DistinguishedName')
 
         # Try / Catch Statement
         Try {
-            $ArrADUserObjs = Get-ADUser -LDAPFilter $StrLDAPFilterOut `
-                                    -Properties SID `
-                                    -Server ($ForestPrivGrp.domaincontroller + ":3268") `
-                                    -ResultSetSize $SubsetCount `
-                                    -ErrorAction Stop
+            # Query 1 of 2 - Initial forest wide query (first pass to obtain limited user details)
+            #  - Privileged Users' SID & DistinguishedName
+            $ForestADUserObjs = Get-ADUser -LDAPFilter $StrLDAPFilterOut `
+                                            -Properties $TmpADUserAttribs `
+                                            -Server ($ForestPrivGrp.AD_DC + ":3268") `
+                                            -ResultSetSize $SubsetCount -ErrorAction Stop `
+                                                | Select-Object $TmpADUserAttribs
+                                    
             }
         Catch 
-            {Write-Host "Error Connecting to DC:" + [string]$ForestPrivGrp.domaincontroller}
+            {# Throws Error
+            Write-Host "Error Connecting to DC:" $ForestPrivGrp.AD_DC -ForegroundColor Red
+            }
 
-        $ArrADUserObjsOut = @()
+        # Select Array
+        $GrpSelect = @()
+        $GrpSelect += @{n='Grp_NestType'         ; e={$ForestPrivGrp.Grp_NestType} }
+        $GrpSelect += @{n='Grp_Scope'            ; e={$ForestPrivGrp.Grp_Scope} }
+        $GrpSelect += @{n='Grp_Name'             ; e={$ForestPrivGrp.Grp_Name} }
+        $GrpSelect += @{n='AD_Forest'            ; e={$ForestPrivGrp.AD_Forest} }
+        $GrpSelect += @{n='Grp_Parent_Domain'    ; e={$ForestPrivGrp.Grp_Parent_Domain} }
+        $GrpSelect += @{n='Grp_Parent'           ; e={$ForestPrivGrp.Grp_Parent} }
+        $GrpSelect += @{n='Grp_Child_Domain'     ; e={$ForestPrivGrp.Grp_Child_Domain} }
+        $GrpSelect += @{n='Grp_Child'            ; e={$ForestPrivGrp.Grp_Child} }
+        $GrpSelect += @{n='AD_DC'                ; e={$ForestPrivGrp.AD_DC} }
+        $GrpSelect += @{n='AD_DomainDN'          ; e={$ForestPrivGrp.AD_DomainDN} }
+        $GrpSelect += @{n='AD_DomainSID'         ; e={$ForestPrivGrp.AD_DomainSID} }
+        $GrpSelect += @{n='Grp_DN'               ; e={$ForestPrivGrp.Grp_DN} }
+        $GrpSelect += @{n='Grp_SID'              ; e={$ForestPrivGrp.Grp_SID} }
+        $GrpSelect += @{n='Grp_AdminCount'       ; e={$ForestPrivGrp.Grp_AdminCount} }
+        $GrpSelect += @{n='Grp_InheritanceBroken'; e={$ForestPrivGrp.InheritanceBroken} }
+        $GrpSelect += $ADUserAttribs # appends Previously defined user attributes.
+
+        # Creates Array Variable - Forest Privileged Users
+        if ($ArrADUserObjsOut -isnot [object])
+            {
+            # Create new array variable
+            $ArrADUserObjsOut = @()
+            }
 
         # Try / Catch Statement
-        foreach ($ObjUser in $ArrADUserObjs)
+        foreach ($ObjUser in $ForestADUserObjs)
             {
-            $ArrADUserObjsOut += @(Get-ADUser -LDAPFilter "(DistinguishedName=$($ObjUser.DistinguishedName))" `
-                                    -Properties $ADUserAttribs `
-                                    -Server ($DT_DomainSIDs.where({$ObjUser.SID.ToString() -match $_.DomainSID}).domaincontroller + ":389") `
-                                    -ResultSetSize $SubsetCount)
-            }
-                                   
-        # Checks if query returned objects
-        if ($ArrADUserObjsOut -is [object])
-            {
-            # Cycles through AD User Objects
-            $ArrADUserObjsOut | & {
-                    process
-                        {
-                        [User]$MyUser = [User]::New($_)
+            # Queryies Domain Datatable for User's home domain DC
+            $PrefDC = ($DT_DomainSIDs.where({$ObjUser.SID.ToString() -match $_.DomainSID}).domaincontroller + ":389")
+            
+            # Builds LDAP Query - Filters for specific users
+            $StrLDAPFilterOut = "(DistinguishedName=$($ObjUser.DistinguishedName))"
 
+            # Query 2 of 2 - Domain query - Specific Privileged Users Details
+            $ArrADUserObjsOut += @(Get-ADUser -LDAPFilter $StrLDAPFilterOut `
+                                    -Properties $ADUserAttribs `
+                                    -Server $PrefDC `
+                                    -ResultSetSize $SubsetCount | `
+                                        Select-Object $GrpSelect)
+            }
+        }
+                                   
+    # Checks if query returned objects
+    if ($ArrADUserObjsOut -is [object])
+        {
+        # Cycles through AD User Objects
+        $ArrADUserObjsOut | & `
+                {
+                process
+                    {
                         # Clears Error buffer
                         $Global:Error.Clear()
+
+                        # Generates User Class Object
+                        [User]$MyUser = [User]::New($_)
+
+                        # Queryies Domain Data Table for User Forest & Domain
+                        $TmpUserForest = $DT_DomainSIDs.where({$MyUser.UserSID -match $_.DomainSID}).Forest
+                        $TmpUserDomain = $DT_DomainSIDs.where({$MyUser.UserSID -match $_.DomainSID}).Domain
+
+                        $UserScope = 'Local to Group'
+                        if ($_.Grp_Child_Domain -eq 'n/a')
+                            {if ($_.Grp_Parent_Domain -ne $TmpUserDomain) {$UserScope = 'Foreign to Group'}}
+                        elseif ($_.Grp_Child_Domain -ne $TmpUserDomain) {$UserScope = 'Foreign to Group'}
 
                         # Creates new Data Table Row
                         $ObjDTRow = $DT_ADUserObjs.NewRow()
 
-                        $_ | Select @(@{n='Counter';e={([string]($ObjDTRow.Counter) + " of " + [string]($ArrADUserObjsOut.count))}},
-                            @{n='Domain';e={$ObjDC.Domain}}
-                            @{n='SamAcctName';e={$_.SamAccountName}})
-
-                        # Populates values to new Datatable Row
+                        # Populates group details/values to Datatable Row
                         $ObjDTRow.ReportDate            = ($Date).ToShortDateString()
-                        $ObjDTRow.Grp_Forest            = $ForestPrivGrp.Forest
-                        $ObjDTRow.Grp_Domain            = $ForestPrivGrp.Domain
-                        $ObjDTRow.Grp_NestType          = $ForestPrivGrp.NestType
-                        $ObjDTRow.Grp_Scope             = $ForestPrivGrp.PrivGrpScope
-                        $ObjDTRow.Grp_Parent            = $ForestPrivGrp.ParentGrp
-                        $ObjDTRow.Grp_Child             = $ForestPrivGrp.ChildGrp
-                        $ObjDTRow.Grp_DomainDN          = $ForestPrivGrp.DomainDN
-                        $ObjDTRow.Grp_DomainController  = $ForestPrivGrp.DomainController
-                        $ObjDTRow.Grp_DomainSID         = $ForestPrivGrp.DomainSID
-                        $ObjDTRow.Grp_Name              = $ForestPrivGrp.PrivGrpName
-                        $ObjDTRow.Grp_DN                = $ForestPrivGrp.PrivGrpDN
-                        $ObjDTRow.Grp_SID               = $ForestPrivGrp.PrivGrpSID
-                        $ObjDTRow.Grp_AdminCount        = $ForestPrivGrp.AdminCount
-                        $ObjDTRow.Grp_InheritanceBroken = $ForestPrivGrp.InheritanceBroken
+                        $ObjDTRow.Grp_NestType          = $_.Grp_NestType
+                        $ObjDTRow.Grp_Scope             = $_.Grp_Scope
+                        $ObjDTRow.Grp_Name              = $_.Grp_Name
+                        $ObjDTRow.AD_Forest             = $_.AD_Forest
+                        $ObjDTRow.Grp_Parent_Domain     = $_.Grp_Parent_Domain
+                        $ObjDTRow.Grp_Parent            = $_.Grp_Parent
+                        $ObjDTRow.Grp_Child_Domain      = $_.Grp_Child_Domain
+                        $ObjDTRow.Grp_Child             = $_.Grp_Child 
+                        $ObjDTRow.AD_DC                 = $_.AD_DC
+                        $ObjDTRow.AD_DomainDN           = $_.AD_DomainDN
+                        $ObjDTRow.AD_DomainSID          = $_.AD_DomainSID
+                        $ObjDTRow.Grp_DN                = $_.Grp_DN
+                        $ObjDTRow.Grp_SID               = $_.Grp_SID
+                        $ObjDTRow.Grp_AdminCount        = $_.Grp_AdminCount
+                        $ObjDTRow.Grp_InheritanceBroken = $_.Grp_InheritanceBroken
 
-                        $ObjDTRow.User_Forest           = $DT_DomainSIDs.where({$MyUser.UserSID -match $_.DomainSID}).Forest
-                        $ObjDTRow.User_Domain           = $DT_DomainSIDs.where({$MyUser.UserSID -match $_.DomainSID}).Domain
+                        # Populates user details/values to Datatable Row
+                        $ObjDTRow.User_Forest           = $TmpUserForest
+                        $ObjDTRow.User_Domain           = $TmpUserDomain
+                        $ObjDTRow.User_Scope            = $UserScope
+                        $ObjDTRow.IsCriticalSystemObject= $MyUser.IsCriticalSystemObject
                         $ObjDTRow.SamAccountName        = $_.SamAccountName
                         $ObjDTRow.DisplayName           = $_.DisplayName
                         $ObjDTRow.Enabled               = $_.enabled
@@ -907,22 +1073,24 @@ Function Get-ADForestUsers {
                         $ObjDTRow.ExpireStatus          = $MyUser.ExpireStatus
                         $ObjDTRow.ExpireDate            = $MyUser.ExpireDate
 
+                        # Calculates Account Expiration Details
                         if ($_.AccountExpirationDate -is [object])
                             {
-                            $ObjDTRow.ExpirationDate  = $_.AccountExpirationDate.ToShortDateString()
-                            $ObjDTRow.ExpirationDays  = $MyUser.GetDateDiff($_.AccountExpirationDate, $Date)
+                            $ObjDTRow.ExpirationDate    = $_.AccountExpirationDate.ToShortDateString()
+                            $ObjDTRow.ExpirationDays    = $MyUser.GetDateDiff($_.AccountExpirationDate, $Date)
                             }
                         else
-                            {$ObjDTRow.ExpirationDate  = $Null ; $ObjDTRow.ExpirationDays  = $Null}
+                            {$ObjDTRow.ExpirationDate   = $Null ; $ObjDTRow.ExpirationDays  = $Null}
 
                         $ObjDTRow.AccountExpires   = $_.accountExpires
                         
+                        # Calculates number of days ago the user logged on
                         if (![string]::isnullorempty($MyUser.lastLogonDate))
-                            {$ObjDTRow.LastLogonDaysAgo   = $MyUser.GetDateDiff($MyUser.lastLogonDate, $Date)}
+                            {$ObjDTRow.LastLogonDaysAgo = $MyUser.GetDateDiff($MyUser.lastLogonDate, $Date)}
+
                         $ObjDTRow.LastLogonTimestamp   = $MyUser.lastLogonTimestamp
                         $ObjDTRow.LastLogonDate        = $MyUser.lastLogonDate
                         $ObjDTRow.LogonCount           = $_.logonCount
-
                         $ObjDTRow.UserPrincipalName    = $_.UserPrincipalName
                         $ObjDTRow.CanonicalName        = $_.CanonicalName
                         $ObjDTRow.Department           = $_.Department
@@ -938,40 +1106,38 @@ Function Get-ADForestUsers {
                         $ObjDTRow.MemberOf             = $MyUser.MemberOf
                         $ObjDTRow.GroupCount           = $MyUser.GroupCount
                         
-                        [Int32]$AdmGrpCnt = 0
+                        # Cycles through memberof - counts number of privileged groups
+                        [Int32]$PrivGrpCnt = 0
                         $MyUser.ArrMemberof | foreach {
-                                $DV_ForestPrivGrps.RowFilter = "PrivGrpDN = '$_'"
+                                $DV_ForestPrivGrps.RowFilter = "Grp_DN = '$_'"
                                 if ($DV_ForestPrivGrps.count -gt 0)
-                                    {$AdmGrpCnt++}}
+                                    {$PrivGrpCnt++}}
 
-                        $ObjDTRow.AdmGrpCnt             = $AdmGrpCnt
-                        $ObjDTRow.Organization          = $_.Organization
-
-
-                        $ObjDTRow.pwdExpired             = $_.PasswordExpired
-                        $ObjDTRow.pwdLastSet             = $_.PasswordLastSet
-                        if (![string]::isnullorempty($_.PasswordLastSet))
-                            {$ObjDTRow.pwdLastSetDaysAgo = $MyUser.GetDateDiff($_.PasswordLastSet, $Date)}
-                        $ObjDTRow.pwdLastSet            = $_.pwdLastSet
-                        $ObjDTRow.CannotChangePwd       = $_.CannotChangePassword
-                        $ObjDTRow.pwdNotRequired        = $_.PasswordNotRequired
-                        $ObjDTRow.pwdNeverExpires       = $_.PasswordNeverExpires
+                        $ObjDTRow.PrivGrpCnt                = $PrivGrpCnt
+                        $ObjDTRow.Organization              = $_.Organization
+                        $ObjDTRow.pwdExpired                = $_.PasswordExpired
+                        $ObjDTRow.pwdLastSet                = $_.PasswordLastSet
                         
-                        $ObjDTRow.SIDHistory            = ($_.SIDHistory | Measure-Object).count
-                        $ObjDTRow.UserAccountControl    = $_.UserAccountControl
+                        if (![string]::isnullorempty($_.PasswordLastSet))
+                            {$ObjDTRow.pwdLastSetDaysAgo    = $MyUser.GetDateDiff($_.PasswordLastSet, $Date)}
+
+                        $ObjDTRow.pwdLastSet                = $_.pwdLastSet
+                        $ObjDTRow.CannotChangePwd           = $_.CannotChangePassword
+                        $ObjDTRow.pwdNotRequired            = $_.PasswordNotRequired
+                        $ObjDTRow.pwdNeverExpires           = $_.PasswordNeverExpires
+                        
+                        $ObjDTRow.SIDHistory                = ($_.SIDHistory | Measure-Object).count
+                        $ObjDTRow.UserAccountControl        = $_.UserAccountControl
                         
                         $ObjDTRow.UAC_PWNotRequired         = $MyUser.PWNotRequired
                         $ObjDTRow.UAC_PWCantChange          = $MyUser.PWCantChange
                         $ObjDTRow.UAC_PWDoesNotExpire       = $MyUser.PWDoesNotExpire
                         $ObjDTRow.UAC_TrustedForDelegation  = $MyUser.TrustedForDelegation
                         $ObjDTRow.UAC_UseDesKeyOnly         = $MyUser.UseDesKeyOnly
-
-                        
-                        $ObjDTRow.whenChanged           = $_.whenChanged.toshortdatestring()
-                        $ObjDTRow.whenCreatedDays       = $MyUser.GetDateDiff($_.whenCreated, $Date)
-                        $ObjDTRow.whenCreated           = $_.whenCreated.toshortdatestring()
-                        
-                        $ObjDTRow.DistinguishedName     = $_.DistinguishedName
+                        $ObjDTRow.whenChanged               = $_.whenChanged.toshortdatestring()
+                        $ObjDTRow.whenCreatedDays           = $MyUser.GetDateDiff($_.whenCreated, $Date)
+                        $ObjDTRow.whenCreated               = $_.whenCreated.toshortdatestring()
+                        $ObjDTRow.DistinguishedName         = $_.DistinguishedName
 
                         $Stale = $Null
                         if (($ObjDTRow.Enabled) -and ($BolFilter))
@@ -987,37 +1153,44 @@ Function Get-ADForestUsers {
                                 
                         $ObjDTRow.Stale                 = $Stale
 
-                        $ObjDTRow | Export-Csv $CSVOut_FullPath -NoTypeInformation -Append
-                        #Write-Debug "Pausing"
+                        # Hash Table
+                        $TempdataOut = [ordered]@{}
+                        $TempdataOut += @{'#'=([string]($ObjDTRow.Counter) + " of " + [string]($ArrADUserObjsOut.count))}
+                        $TempdataOut += @{'Forest' = $DT_DomainSIDs.where({$MyUser.UserSID -match $_.DomainSID}).Forest}
+                        $TempdataOut += @{'Domain' = $DT_DomainSIDs.where({$MyUser.UserSID -match $_.DomainSID}).Domain}
+                        $TempdataOut += @{'Domain Conroller' = $DT_DomainSIDs.where({$MyUser.UserSID -match $_.DomainSID}).DomainController}
+                        $TempdataOut += @{'SamAcctName' = $_.SamAccountName}
+                        $TempdataOut += @{'User Scope' = $UserScope}
+
+                        # Writes Hash Table to Screen Output
+                        Write-Output (New-Object -TypeName PSObject -Property $TempdataOut)
+
+                        $ObjDTRow | Export-Csv $Export -NoTypeInformation -Append
+                        
                         $ObjDTRow = $Null
                         $MyUser = $Null
                         }
-                    }
+                }
+
+        # Post Script: Writes Output to Screen
+        $script:ArrOutputCSVs += @("Forest Users:$($ObjForest.Rootdomain) | Output CSV File: $Export")
         }
-    }
+    
+    # Nulls Datatables
     $DT_DomainSIDs = $Null
     $DT_ForestPrivGrps = $Null
+    $DT_ADUserObjs = $Null
 }
 
-# Generates File Date Suffix - e.g. 2020-8-23-23-49
-$StrFileDateSuffix = "{0}-{1}-{2}-{3}-{4}" `
-            -f $Date.year, $Date.month, $Date.Day, `
-                $Date.Minute, $Date.Second
+    # Creates Arrau Variable
+    $Script:ArrOutputCSVs = @()
 
-# Generates Export Path
-$RootExportFolder =  $env:TEMP
+    # Cycles through Forest Array
+    $Forests | Foreach {Get-ADPrivUsers $_}
 
-#$RootExportFolder = Join-Path $RootDrive $RootFolder
-$RootExportFolder = ("S:\UserData\ShawnMay\{0}{1}{2} - Data" -f $Date.month, $Date.Day, $Date.Year)
-
-# Validate / Create Export Folder Structure
-Validate-Folder $RootExportFolder
-
-$ArrForests = @()
-$ArrForests += 'dco.net'
-#$ArrForests += 'blackbaud.net'
-#$ArrForests += 'blackbaudhost.com'
-
-$ArrForests | Foreach {Get-ADForestUsers $_ -debug}
-
-$DT_ADUserObjs = $Null
+    # Cycles through text output
+    Foreach ($StrOutput in $ArrOutputCSVs)
+        {
+        Write-Host "-------------------------"
+        Write-Host $StrOutput `n
+        }
