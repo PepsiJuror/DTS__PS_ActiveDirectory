@@ -10,6 +10,11 @@
     This script however excluding delegation for Conditional Forwarders, including the 
     coveted _msdcs. zone. 
 
+    Important Note:  Delegation will need to be rerun / reexecuted if:
+    - AD zone replication scopes are modified (e.g. zone replication is moved from DomainDNSZone 
+    to ForestDNSZones)
+    - An AD zone is created
+
 .Notes:
     File Name: Set-DNSDelegation.ps1
     Author   : Shawn May
